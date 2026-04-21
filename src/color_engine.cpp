@@ -327,28 +327,25 @@ static RGBImage convert_multichannel(const ParsedPSD& psd) {
             if (static_cast<int>(ch) == white_channel) continue;  // already handled
 
             const auto& info = psd.channels[ch];
-            double tint = psd.pixel_data[ch][i] / 255.0;
+            // Invert: in these multichannel PSDs, 0=full ink, 255=no ink
+            double tint = 1.0 - (psd.pixel_data[ch][i] / 255.0);
             if (tint < 0.001) continue;  // skip empty ink
 
             if (info.has_color) {
                 if (info.color_space == 7) {
-                    // Lab color — scale by tint and convert
+                    // Use solid ink color — coverage is the blend alpha
                     Lab solid = psd_lab_to_float(info.color_components[0],
                                                   info.color_components[1],
                                                   info.color_components[2]);
-                    Lab tinted = { solid.L * tint, solid.a * tint, solid.b * tint };
-                    XYZ ch_xyz = lab_to_xyz(tinted);
+                    XYZ ch_xyz = lab_to_xyz(solid);
 
-                    // Additive composite in XYZ (simplified)
-                    // For ink on white: subtract from white
-                    // Simplified model: blend the color onto substrate
                     X = X * (1.0 - tint) + ch_xyz.X * tint;
                     Y = Y * (1.0 - tint) + ch_xyz.Y * tint;
                     Z = Z * (1.0 - tint) + ch_xyz.Z * tint;
                 }
             } else {
                 // No color metadata — grayscale fallback
-                double gray = psd.pixel_data[ch][i] / 255.0;
+                double gray = 1.0 - (psd.pixel_data[ch][i] / 255.0);
                 X = X * (1.0 - gray * 0.5);
                 Y = Y * (1.0 - gray * 0.5);
                 Z = Z * (1.0 - gray * 0.5);

@@ -284,7 +284,6 @@ static RGBImage convert_lab(const ParsedPSD& psd) {
 
 struct InkInfo {
     XYZ ink_xyz;       // pre-computed solid ink color in XYZ (from Lab)
-    double solidity;   // ink opacity 0.0-1.0 from resource 1077
     bool has_data;
 };
 
@@ -305,11 +304,10 @@ static RGBImage convert_multichannel(const ParsedPSD& psd) {
     // Original alpha-blend at 1.0 was slightly too light vs Photoshop.
     constexpr double ink_strength = 1.3;
 
-    // Pre-compute ink XYZ values and solidity outside pixel loop
+    // Pre-compute ink XYZ values outside pixel loop
     std::vector<InkInfo> inks(psd.channels.size());
     for (size_t ch = 0; ch < psd.channels.size(); ++ch) {
         inks[ch].has_data = false;
-        inks[ch].solidity = psd.channels[ch].solidity / 100.0;
         const auto& info = psd.channels[ch];
         if (info.has_color && info.color_space == 7) {
             Lab solid = psd_lab_to_float(info.color_components[0],
@@ -355,18 +353,15 @@ static RGBImage convert_multichannel(const ParsedPSD& psd) {
             double tint = 1.0 - (psd.pixel_data[ch][i] / 255.0);
             if (tint < 0.001) continue;
 
-            // Scale tint by solidity: partial-solidity inks apply less color
-            double effective_tint = tint * inks[ch].solidity;
-
             if (inks[ch].has_data) {
                 // Alpha-blend in XYZ with adjustable strength
-                double t = std::min(effective_tint * ink_strength, 1.0);
+                double t = std::min(tint * ink_strength, 1.0);
                 X = X * (1.0 - t) + inks[ch].ink_xyz.X * t;
                 Y = Y * (1.0 - t) + inks[ch].ink_xyz.Y * t;
                 Z = Z * (1.0 - t) + inks[ch].ink_xyz.Z * t;
             } else {
                 // No color metadata — grayscale fallback
-                double gray = effective_tint;
+                double gray = tint;
                 X = X * (1.0 - gray * 0.5);
                 Y = Y * (1.0 - gray * 0.5);
                 Z = Z * (1.0 - gray * 0.5);

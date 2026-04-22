@@ -280,6 +280,14 @@ static RGBImage convert_lab(const ParsedPSD& psd) {
     return img;
 }
 
+// --- Multichannel Ink Info (pre-computed per channel) ---
+
+struct InkInfo {
+    XYZ ink_xyz;       // pre-computed solid ink color in XYZ (from Lab)
+    double solidity;   // ink opacity 0.0-1.0 from resource 1077
+    bool has_data;
+};
+
 static RGBImage convert_multichannel(const ParsedPSD& psd) {
     RGBImage img;
     img.width = psd.width;
@@ -288,64 +296,77 @@ static RGBImage convert_multichannel(const ParsedPSD& psd) {
 
     size_t pixel_count = (size_t)psd.width * psd.height;
 
-    // For each pixel, composite all channels in XYZ space
-    for (size_t i = 0; i < pixel_count; ++i) {
-        // Start with substrate white (D50)
-        double X = 0.9642, Y = 1.0, Z = 0.8249;
+    // D50 paper white substrate
+    constexpr double paper_X = 0.9642;
+    constexpr double paper_Y = 1.0000;
+    constexpr double paper_Z = 0.8249;
 
-        // Check for white underprint channel first
-        int white_channel = -1;
-        for (size_t ch = 0; ch < psd.channels.size(); ++ch) {
-            const auto& info = psd.channels[ch];
-            if (info.has_color && info.color_space == 7) {
-                Lab lab = psd_lab_to_float(info.color_components[0],
-                                           info.color_components[1],
-                                           info.color_components[2]);
-                if (lab.L > 95.0 && std::abs(lab.a) < 5.0 && std::abs(lab.b) < 5.0) {
-                    white_channel = static_cast<int>(ch);
-                    break;
-                }
-            }
-            if (info.name.find("White") != std::string::npos ||
-                info.name.find("white") != std::string::npos) {
-                white_channel = static_cast<int>(ch);
-                break;
-            }
+    // Ink strength: >1.0 applies ink more aggressively (darker), <1.0 lighter.
+    // Original alpha-blend at 1.0 was slightly too light vs Photoshop.
+    constexpr double ink_strength = 1.3;
+
+    // Pre-compute ink XYZ values and solidity outside pixel loop
+    std::vector<InkInfo> inks(psd.channels.size());
+    for (size_t ch = 0; ch < psd.channels.size(); ++ch) {
+        inks[ch].has_data = false;
+        inks[ch].solidity = psd.channels[ch].solidity / 100.0;
+        const auto& info = psd.channels[ch];
+        if (info.has_color && info.color_space == 7) {
+            Lab solid = psd_lab_to_float(info.color_components[0],
+                                          info.color_components[1],
+                                          info.color_components[2]);
+            inks[ch].ink_xyz = lab_to_xyz(solid);
+            inks[ch].has_data = true;
         }
+    }
 
-        // Apply white underprint
+    // Detect white underprint by NAME only.
+    // Lab-based detection causes false positives (e.g. Zari = Lab(100,0,0) is gold, not white).
+    int white_channel = -1;
+    for (size_t ch = 0; ch < psd.channels.size(); ++ch) {
+        const auto& name = psd.channels[ch].name;
+        if (name.find("White") != std::string::npos ||
+            name.find("white") != std::string::npos) {
+            white_channel = static_cast<int>(ch);
+            break;
+        }
+    }
+
+    // Composite all channels in XYZ space
+    for (size_t i = 0; i < pixel_count; ++i) {
+        double X = paper_X, Y = paper_Y, Z = paper_Z;
+
+        // Apply white underprint first
         if (white_channel >= 0 && white_channel < (int)psd.pixel_data.size()) {
             double white_tint = psd.pixel_data[white_channel][i] / 255.0;
-            // Blend substrate toward pure white
-            X = X * (1.0 - white_tint) + 0.9642 * white_tint;
-            Y = Y * (1.0 - white_tint) + 1.0000 * white_tint;
-            Z = Z * (1.0 - white_tint) + 0.8249 * white_tint;
+            X = X * (1.0 - white_tint) + paper_X * white_tint;
+            Y = Y * (1.0 - white_tint) + paper_Y * white_tint;
+            Z = Z * (1.0 - white_tint) + paper_Z * white_tint;
         }
 
         // Composite each ink channel
         for (size_t ch = 0; ch < psd.channels.size(); ++ch) {
-            if (static_cast<int>(ch) == white_channel) continue;  // already handled
+            if (static_cast<int>(ch) == white_channel) continue;
 
-            const auto& info = psd.channels[ch];
-            // Invert: in these multichannel PSDs, 0=full ink, 255=no ink
+            // Skip channels with 0% solidity only if they have no pixel data
+            // 0% solidity in PSD means "use ink at full strength" for display purposes
+
+            // Invert: 0=full ink, 255=no ink
             double tint = 1.0 - (psd.pixel_data[ch][i] / 255.0);
-            if (tint < 0.001) continue;  // skip empty ink
+            if (tint < 0.001) continue;
 
-            if (info.has_color) {
-                if (info.color_space == 7) {
-                    // Use solid ink color — coverage is the blend alpha
-                    Lab solid = psd_lab_to_float(info.color_components[0],
-                                                  info.color_components[1],
-                                                  info.color_components[2]);
-                    XYZ ch_xyz = lab_to_xyz(solid);
+            // Scale tint by solidity: partial-solidity inks apply less color
+            double effective_tint = tint * inks[ch].solidity;
 
-                    X = X * (1.0 - tint) + ch_xyz.X * tint;
-                    Y = Y * (1.0 - tint) + ch_xyz.Y * tint;
-                    Z = Z * (1.0 - tint) + ch_xyz.Z * tint;
-                }
+            if (inks[ch].has_data) {
+                // Alpha-blend in XYZ with adjustable strength
+                double t = std::min(effective_tint * ink_strength, 1.0);
+                X = X * (1.0 - t) + inks[ch].ink_xyz.X * t;
+                Y = Y * (1.0 - t) + inks[ch].ink_xyz.Y * t;
+                Z = Z * (1.0 - t) + inks[ch].ink_xyz.Z * t;
             } else {
                 // No color metadata — grayscale fallback
-                double gray = 1.0 - (psd.pixel_data[ch][i] / 255.0);
+                double gray = effective_tint;
                 X = X * (1.0 - gray * 0.5);
                 Y = Y * (1.0 - gray * 0.5);
                 Z = Z * (1.0 - gray * 0.5);

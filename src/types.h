@@ -16,6 +16,7 @@ struct ParsedPSD {
         uint16_t color_space = 0;     // 0=RGB, 2=CMYK, 7=Lab
         int16_t color_components[4] = {0, 0, 0, 0};
         bool has_color = false;
+        uint16_t solidity = 100;      // Ink opacity 0-100% from resource 1077
     };
     std::vector<ChannelInfo> channels;
 

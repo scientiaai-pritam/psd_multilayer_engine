@@ -50,6 +50,7 @@ struct SpotColorEntry {
     int32_t channel_id = 0;
     uint16_t color_space = 0;
     int16_t components[4] = {0, 0, 0, 0};
+    uint16_t solidity = 100;  // opacity 0-100% from resource 1077
 };
 
 struct ResourceData {
@@ -91,22 +92,28 @@ static std::vector<SpotColorEntry> parse_resource_1067(const uint8_t* data, size
 
 static std::vector<SpotColorEntry> parse_resource_1077(const uint8_t* data, size_t len) {
     // Resource 1077: DisplayInfo
-    // 2 bytes count, then per entry: 2 bytes color space + 4*2 bytes components + 2 bytes padding
-    if (len < 2) return {};
+    // Format: 2 bytes version + 2 bytes (flags, not entry count) + N entries of 13 bytes each
+    // Per entry: 2 bytes color space + 8 bytes components + 2 bytes solidity(%) + 1 byte kind
+    // Entry count is derived from resource size: (len - 4) / 13
+    if (len < 4) return {};
 
-    uint16_t count = (uint16_t(data[0]) << 8) | data[1];
+    // Derive entry count from data size
+    size_t count = (len - 4) / 13;
+
     std::vector<SpotColorEntry> entries;
-    size_t offset = 2;
-    for (uint16_t i = 0; i < count && offset + 12 <= len; ++i) {
+    size_t offset = 4;
+    for (size_t i = 0; i < count && offset + 13 <= len; ++i) {
         SpotColorEntry e;
-        e.channel_id = i; // DisplayInfo is indexed sequentially
+        e.channel_id = static_cast<int32_t>(i); // DisplayInfo is indexed sequentially
         e.color_space = (uint16_t(data[offset]) << 8) | data[offset+1];
         offset += 2;
         for (int j = 0; j < 4; ++j) {
             e.components[j] = (int16_t((uint16_t(data[offset]) << 8) | data[offset+1]));
             offset += 2;
         }
-        offset += 2; // padding
+        e.solidity = (uint16_t(data[offset]) << 8) | data[offset+1]; // opacity 0-100
+        offset += 2;
+        offset += 1; // kind byte
         entries.push_back(e);
     }
     return entries;
@@ -443,11 +450,13 @@ ParsedPSD parse_psd(const std::string& filepath) {
         result.channels[i].has_color = true;
     }
 
-    // Apply DisplayInfo (resource 1077) as fallback for channels without color
+    // Apply DisplayInfo (resource 1077) for solidity and fallback color
     // DisplayInfo is indexed sequentially matching pixel data channel order
     for (size_t i = 0; i < resources.display_info.size() && i < result.channels.size(); ++i) {
+        const auto& di = resources.display_info[i];
+        // Always apply solidity from DisplayInfo
+        result.channels[i].solidity = di.solidity;
         if (!result.channels[i].has_color) {
-            const auto& di = resources.display_info[i];
             result.channels[i].color_space = di.color_space;
             for (int j = 0; j < 4; ++j) {
                 result.channels[i].color_components[j] = di.components[j];

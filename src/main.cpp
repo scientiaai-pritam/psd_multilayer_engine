@@ -11,6 +11,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -o, --output <path>   Output file path (default: input.png)\n");
     fprintf(stderr, "  -s, --size <N>        Thumbnail size (default: 512)\n");
+    fprintf(stderr, "  -f, --fullsize        Output at native PSD resolution (no downscale)\n");
     fprintf(stderr, "  -v, --verbose         Print timing and channel info\n");
 }
 
@@ -19,6 +20,7 @@ int main(int argc, char* argv[]) {
     std::string output_path;
     uint32_t thumb_size = 512;
     bool verbose = false;
+    bool fullsize = false;
 
     // Simple argument parsing
     for (int i = 1; i < argc; ++i) {
@@ -27,6 +29,8 @@ int main(int argc, char* argv[]) {
             output_path = argv[++i];
         } else if ((arg == "-s" || arg == "--size") && i + 1 < argc) {
             thumb_size = static_cast<uint32_t>(std::stoi(argv[++i]));
+        } else if (arg == "-f" || arg == "--fullsize") {
+            fullsize = true;
         } else if (arg == "-v" || arg == "--verbose") {
             verbose = true;
         } else if (arg[0] != '-') {
@@ -72,8 +76,8 @@ int main(int argc, char* argv[]) {
         printf("ICC profile: %zu bytes\n", psd.icc_profile.size());
         for (size_t i = 0; i < psd.channels.size(); ++i) {
             const auto& ch = psd.channels[i];
-            printf("  Channel %zd: id=%d name='%s' colorspace=%u has_color=%d\n",
-                   i, ch.channel_id, ch.name.c_str(), ch.color_space, ch.has_color);
+            printf("  Channel %zd: id=%d name='%s' colorspace=%u has_color=%d solidity=%u%%\n",
+                   i, ch.channel_id, ch.name.c_str(), ch.color_space, ch.has_color, ch.solidity);
         }
     }
 
@@ -81,8 +85,13 @@ int main(int argc, char* argv[]) {
     RGBImage rgb = convert_to_rgb(psd);
     auto t2 = std::chrono::high_resolution_clock::now();
 
-    // Stage 3: Downscale
-    RGBImage thumb = downscale(rgb, thumb_size, thumb_size);
+    // Stage 3: Downscale (or keep full size)
+    RGBImage thumb;
+    if (fullsize) {
+        thumb = std::move(rgb);
+    } else {
+        thumb = downscale(rgb, thumb_size, thumb_size);
+    }
     auto t3 = std::chrono::high_resolution_clock::now();
 
     // Stage 4: Write PNG
